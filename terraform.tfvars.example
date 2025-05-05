@@ -1,0 +1,22 @@
+# Example Variable Definitions - Create terraform.tfvars with your values
+
+# --- Required --- #
+# key_pair_name    = "your-key-pair-name-in-target-region"
+
+# --- Recommended --- #
+# aws_region       = "eu-central-1" # e.g., Frankfurt
+# ssh_allowed_cidr = ["YOUR_HOME_IP/32"] # Restrict SSH access
+
+# --- Optional --- #
+# instance_type = "t3.small"
+# availability_zone = "eu-central-1a"
+# server_name_tag = "RustDesk-Server-Prod"
+
+# --- Deployment Type --- #
+
+# Option 1: Deploy OSS Version (Default)
+deploy_pro_version = false
+
+# Option 2: Deploy Pro Version
+# deploy_pro_version                 = true
+# rustdesk_pro_license_secret_name = "name-of-your-secret-in-secrets-manager" # Required if deploy_pro_version=true 

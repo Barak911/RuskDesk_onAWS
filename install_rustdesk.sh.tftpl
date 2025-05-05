@@ -1,0 +1,122 @@
+#!/bin/bash
+#cloud-config
+# vim: syntax=cloud-config
+
+# Note: This script uses cloud-config format for package management and runcmd
+# It will be processed by cloud-init on the first boot.
+
+package_update: true
+package_upgrade: true
+
+# Install necessary packages
+packages:
+  - curl
+  - docker.io # Installs Docker from Ubuntu repo
+  - awscli    # Needed only if fetching license key for Pro
+
+runcmd:
+  # Install Docker Compose v1 (Docker package might not include compose)
+  - echo "--- Installing Docker Compose v1 ---"
+  - '[ ! -f /usr/local/bin/docker-compose ] && curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose || echo "Docker Compose v1 already installed."' 
+  # Enable and start docker
+  - echo "--- Enabling and starting Docker --- "
+  - systemctl enable docker
+  - systemctl start docker
+  # Add ubuntu user to docker group (useful for potential manual debugging)
+  - usermod -aG docker ubuntu
+
+  # Create install dir
+  - INSTALL_DIR="/opt/rustdesk-server"
+  - echo "--- Creating RustDesk directory: $INSTALL_DIR ---"
+  - mkdir -p "$INSTALL_DIR"
+  - mkdir -p "$INSTALL_DIR/data" # Ensure data directory exists
+
+  # --- Conditional Pro License Fetching --- 
+  - |
+    #!/bin/bash
+    set -e # Fail fast within this sub-script
+    # Check if Pro deployment is intended and secret name is provided
+    if [ "${deploy_pro_version}" == "true" ] && [ -n "${secret_name}" ]; then
+      echo "--- Fetching RustDesk Pro license key ---"
+      LICENSE_FILE="$INSTALL_DIR/data/rustdesk-lic.txt" # Assuming this is the expected file name
+      echo "Attempting to fetch secret ${secret_name} from region ${aws_region}..."
+      # Fetch the secret value using the instance role
+      # Use AWS CLI v2 command structure if installed, otherwise fallback (adjust if needed)
+      if SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id "${secret_name}" --region "${aws_region}" --output json 2>/tmp/aws_error.log); then
+        if SECRET_STRING=$(echo "$SECRET_JSON" | jq -r '.SecretString // empty'); then
+            if [ -n "$SECRET_STRING" ]; then 
+                echo "$SECRET_STRING" > "$LICENSE_FILE"
+                echo "License key fetched successfully to $LICENSE_FILE"
+                chmod 600 "$LICENSE_FILE" # Restrict permissions
+            else
+                echo "ERROR: SecretString is empty in fetched secret." >&2
+                exit 1 # Fail the script
+            fi
+        else
+            echo "ERROR: Could not parse SecretString from AWS response (jq missing or error?)." >&2
+            exit 1 # Fail the script
+        fi
+      else
+        echo "ERROR: Failed to fetch license key from Secrets Manager. See /tmp/aws_error.log. Check IAM permissions, region, and secret name." >&2
+        exit 1 # Fail the script
+      fi
+    else
+      echo "--- Skipping license key fetch (Deploying OSS or secret_name not provided) ---"
+    fi 
+  
+  # --- Create docker-compose.yml --- 
+  - |
+    #!/bin/bash
+    INSTALL_DIR="/opt/rustdesk-server"
+    COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
+    echo "--- Creating $COMPOSE_FILE ---"
+    cat << EOF > $COMPOSE_FILE
+    version: '3'
+    services:
+    %{ if deploy_pro_version ~}
+      rustdesk-pro-server: # Pro version service
+        image: rustdesk/rustdesk-server-pro
+        container_name: rustdesk-pro
+        # Command might be implicit in Pro image, check docs if needed
+        ports:
+          - "21115:21115"
+          - "21116:21116"
+          - "21117:21117"
+          - "21118:21118" # Keep for compatibility? Check Pro docs
+          - "21119:21119"
+        volumes:
+          - ./data:/root # License key expected in /root inside container
+        restart: unless-stopped
+    %{ else ~}
+      hbbs: # OSS ID Server
+        image: rustdesk/rustdesk-server
+        container_name: hbbs
+        command: hbbs
+        volumes:
+          - ./data:/root
+        network_mode: "host"
+        restart: unless-stopped
+        depends_on:
+          - hbbr
+      hbbr: # OSS Relay Server
+        image: rustdesk/rustdesk-server
+        container_name: hbbr
+        command: hbbr
+        volumes:
+          - ./data:/root
+        network_mode: "host"
+        restart: unless-stopped
+    %{ endif ~}
+    EOF
+
+  # --- Start Services --- 
+  - echo "--- Pulling Docker images ---"
+  - docker-compose -f "$INSTALL_DIR/docker-compose.yml" pull
+  - echo "--- Starting RustDesk services defined in docker-compose.yml ---"
+  - docker-compose -f "$INSTALL_DIR/docker-compose.yml" up -d
+
+  # Final message
+  - echo "--- User data script finished ---"
+
+# Make sure cloud-init knows this is the final stage
+final_message: "Cloud-init finished. System is ready." 
